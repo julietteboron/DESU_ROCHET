@@ -12,6 +12,8 @@ ensuite appliqué tel quel à X_test et à df_inconnu.
 Ici : chargement des données, séparation connu/inconnu, split train/test, calcul du % de valeurs manquantes, suppression des colonnes trop manquantes, suppression des lignes totalement vides, et imputation des valeurs manquantes (moyenne pour le numérique, mode pour le catégoriel).
 A faire en + : encodage, outliers , autres transformations si nécessaire 
 """
+import csv
+
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
@@ -21,7 +23,27 @@ SCORES_CONNUS = ["a", "b", "c", "d", "e"]
 
 def load_data(file_path=r"..\data\en.openfoodfacts.org.products.csv.gz", sample_size=10000, sep="\t", encoding="utf-8"):
     """Charge le CSV et retourne un DataFrame."""
-    return pd.read_csv(file_path, sep=sep, encoding=encoding, nrows=sample_size)
+    return pd.read_csv(file_path, sep=sep, encoding=encoding, nrows=sample_size, quoting=csv.QUOTE_NONE)
+
+
+def load_and_split_known_unknown(file_path, target_col="nutriscore_grade", chunksize=100_000, sep="\t", encoding="utf-8"):
+    """
+    Lit le CSV par morceaux de `chunksize` lignes (au lieu de tout charger
+    d'un coup avec load_data) pour pouvoir traiter un fichier énorme.
+    Sépare connu/inconnu à chaque morceau, puis recolle les morceaux entre eux.
+    """
+    connus, inconnus = [], []
+    lecteur = pd.read_csv(
+        file_path, sep=sep, encoding=encoding, chunksize=chunksize,
+        low_memory=False, quoting=csv.QUOTE_NONE,
+    )
+    for morceau in lecteur:
+        morceau_connu, morceau_inconnu = split_known_unknown(morceau, target_col=target_col)
+        connus.append(morceau_connu)
+        inconnus.append(morceau_inconnu)
+    df_connu = pd.concat(connus, ignore_index=True)
+    df_inconnu = pd.concat(inconnus, ignore_index=True)
+    return df_connu, df_inconnu
 
 
 def split_known_unknown(df, target_col="nutriscore_grade"):
@@ -114,6 +136,7 @@ def apply_imputation(df, valeurs_imputation):
 def preprocess_pipeline(
     file_path=r"..\data\en.openfoodfacts.org.products.csv.gz",
     sample_size=10000,
+    chunksize=None,
     features=None,
     target_col="nutriscore_grade",
     missing_threshold=60,
@@ -123,6 +146,10 @@ def preprocess_pipeline(
     """
     Enchaîne toutes les étapes dans le bon ordre et retourne un dict
     contenant tout ce dont tu as besoin pour entraîner et prédire.
+
+    Si `chunksize` est renseigné, le CSV entier est lu morceau par morceau
+    (au lieu de s'arrêter à `sample_size` lignes) : utile pour un fichier
+    trop gros pour tenir en mémoire d'un coup.
     """
     features = features or [
         "energy_100g", "saturated-fat_100g", "sugars_100g", "salt_100g",
@@ -131,8 +158,13 @@ def preprocess_pipeline(
     ]
 
     # 1. Chargement + séparation connu/inconnu (aucun calcul appris ici)
-    df = load_data(file_path=file_path, sample_size=sample_size)
-    df_connu, df_inconnu = split_known_unknown(df, target_col=target_col)
+    if chunksize is not None:
+        df_connu, df_inconnu = load_and_split_known_unknown(
+            file_path=file_path, target_col=target_col, chunksize=chunksize
+        )
+    else:
+        df = load_data(file_path=file_path, sample_size=sample_size)
+        df_connu, df_inconnu = split_known_unknown(df, target_col=target_col)
 
     # 2. Split AVANT tout calcul statistique
     X_train, X_test, y_train, y_test = split_train_test(
