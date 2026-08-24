@@ -1,5 +1,5 @@
 """
-nutriscore_model.py
+logreg.py
 
 Fonctions pour :
 - afficher une matrice de corrélation
@@ -34,7 +34,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 # Matrice de corrélation
 # ==========================
 
-def plot_correlation_matrix(df, target_col="nutriscore_grade", method="pearson", figsize=(12, 10)):
+def plot_correlation_matrix(df_restr, target_col="nutriscore_grade", method="pearson", figsize=(12, 10)):
     """
     Affiche la matrice de corrélation des variables numériques (target exclue).
 
@@ -54,7 +54,7 @@ def plot_correlation_matrix(df, target_col="nutriscore_grade", method="pearson",
     corr : DataFrame
         La matrice de corrélation.
     """
-    df_num = df.drop(columns=[target_col]).copy()
+    df_num = df_restr.drop(columns=[target_col]).copy()
     corr = df_num.corr(method=method)
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -70,7 +70,7 @@ def plot_correlation_matrix(df, target_col="nutriscore_grade", method="pearson",
 # VIF (multicolinéarité)
 # ==========================
 
-def compute_vif(df, target_col="nutriscore_grade", threshold=5.0):
+def compute_vif(df_restr, target_col="nutriscore_grade", threshold=5.0):
     """
     Calcule le VIF (Variance Inflation Factor) de chaque variable numérique.
     Un VIF > 5-10 signale un problème de colinéarité.
@@ -91,7 +91,7 @@ def compute_vif(df, target_col="nutriscore_grade", threshold=5.0):
     vif_ok : list
         Liste des variables dont le VIF est sous le seuil.
     """
-    df_num = df.drop(columns=[target_col]).copy()
+    df_num = df_restr.drop(columns=[target_col]).copy()
     X = add_constant(df_num)
 
     vif_data = pd.DataFrame()
@@ -151,7 +151,6 @@ def train_ordinal_logit(X_train, y_train, ordre=ORDRE_NUTRISCORE):
 
     return result, scaler
 
-
 def evaluate_ordinal_model(result, scaler, X_test, y_test, ordre=ORDRE_NUTRISCORE):
     """
     Applique le scaler à X_test, prédit et évalue le modèle ordinal.
@@ -183,6 +182,8 @@ def evaluate_ordinal_model(result, scaler, X_test, y_test, ordre=ORDRE_NUTRISCOR
     )
 
     probas = result.predict(X_test_scaled)
+    # Les colonnes de probas sont les codes 0..K-1 -> on les remappe vers les labels d'origine
+    probas.columns = ordre
     pred = probas.idxmax(axis=1)
 
     print("Accuracy :", accuracy_score(y_test, pred))
@@ -191,22 +192,24 @@ def evaluate_ordinal_model(result, scaler, X_test, y_test, ordre=ORDRE_NUTRISCOR
 
     return pred, probas
 
-
 # ==========================
 # LASSO (avec CV interne)
 # ==========================
 
-def run_lassocv(X, y, cv=5, max_iter=1000, scale=True, dropna=True, random_state=42):
+from sklearn.linear_model import LogisticRegressionCV
+
+def run_lasso_logit(X, y, cv=5, max_iter=1000, scale=True, dropna=True, random_state=42, ordre=ORDRE_NUTRISCORE):
     """
-    Entraîne un LassoCV (régression Lasso avec sélection automatique d'alpha
-    par validation croisée) et retourne le modèle entraîné.
+    Entraîne une régression logistique multinomiale pénalisée L1 (Lasso logistique)
+    avec sélection automatique de C par validation croisée. Utile pour la sélection
+    de variables sur une cible catégorielle (ex : nutriscore).
 
     Parameters
     ----------
     X : DataFrame
         Variables explicatives.
     y : Series
-        Variable cible (continue).
+        Variable cible catégorielle (ex : nutriscore_grade).
     cv : int
         Nombre de folds pour la validation croisée.
     max_iter : int
@@ -217,10 +220,12 @@ def run_lassocv(X, y, cv=5, max_iter=1000, scale=True, dropna=True, random_state
         Si True, supprime les lignes avec des NaN (X et y ensemble).
     random_state : int
         Pour la reproductibilité.
+    ordre : list
+        Ordre des catégories cibles (pour l'affichage des coefficients par classe).
 
     Returns
     -------
-    model : LassoCV
+    model : LogisticRegressionCV
         Le modèle entraîné.
     scaler : StandardScaler ou None
         Le scaler utilisé (None si scale=False).
@@ -237,16 +242,37 @@ def run_lassocv(X, y, cv=5, max_iter=1000, scale=True, dropna=True, random_state
         scaler = StandardScaler()  # centre-réduit les données : moyenne 0, écart-type 1
         X = scaler.fit_transform(X)  # calcule moyenne/écart-type puis transforme
 
-    model = LassoCV(cv=cv, max_iter=max_iter, random_state=random_state)
+    model = LogisticRegressionCV(
+        cv=cv,
+        max_iter=max_iter,
+        random_state=random_state,
+        penalty="l1",
+        solver="saga",
+        Cs=10,  # nombre de valeurs de régularisation testées le long de la grille
+    )
     model.fit(X, y)
 
     print(f"Lignes utilisées : {len(y)}")
-    print(f"Alpha optimal sélectionné : {model.alpha_:.5f}")
-    print(f"R² : {model.score(X, y):.3f}")
+    print(f"Accuracy (train) : {model.score(X, y):.3f}")
 
     if feature_names is not None:
-        print("\nCoefficients :")
-        for name, coef in zip(feature_names, model.coef_):
-            print(f"  {name}: {coef:.4f}")
+        classes = list(model.classes_)
+        # on réordonne les classes selon `ordre` si elles correspondent, sinon on garde l'ordre du modèle
+        classes_affichage = [c for c in ordre if c in classes] or classes
+
+        print("\nCoefficients par classe (Lasso logistique) :")
+        for cls in classes_affichage:
+            idx = list(classes).index(cls)
+            coefs_cls = model.coef_[idx]
+            print(f"\n  Classe '{cls}' :")
+            for name, coef in zip(feature_names, coefs_cls):
+                print(f"    {name}: {coef:.4f}")
+
+        # variables dont le coefficient est nul sur TOUTES les classes -> jugées non informatives par Lasso
+        coefs_nuls_partout = [
+            name for i, name in enumerate(feature_names)
+            if all(model.coef_[c][i] == 0 for c in range(len(classes)))
+        ]
+        print(f"\nVariables avec coefficient nul sur toutes les classes : {coefs_nuls_partout}")
 
     return model, scaler
