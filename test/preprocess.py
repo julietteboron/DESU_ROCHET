@@ -133,6 +133,42 @@ def apply_imputation(df, valeurs_imputation):
     return df
 
 
+def remove_outliers_iqr(df_features, cols, bounds=None):
+    """
+    Détecte les outliers via la méthode IQR (1.5 * écart interquartile) sur les
+    colonnes `cols`. Si `bounds=None`, les bornes sont calculées sur df_features
+    (à faire UNIQUEMENT sur X_train, pour ne pas apprendre sur X_test/df_inconnu).
+    Sinon, les bornes fournies (apprises sur X_train) sont réutilisées telles
+    quelles, comme pour `apply_imputation`.
+ 
+    Parameters
+    ----------
+    df_features : DataFrame
+        Données sur lesquelles détecter les outliers.
+    cols : list
+        Colonnes numériques à examiner.
+    bounds : dict, optional
+        {colonne: (borne_basse, borne_haute)} déjà appris sur X_train.
+ 
+    Returns
+    -------
+    masque : Series (bool)
+        True pour les lignes considérées comme outliers (à retirer).
+    bounds : dict
+        Les bornes utilisées (à réutiliser sur X_test / df_inconnu).
+    """
+    masque = pd.Series(False, index=df_features.index)
+    if bounds is None:
+        bounds = {}
+        for col in cols:
+            Q1, Q3 = df_features[col].quantile([0.25, 0.75])
+            IQR = Q3 - Q1
+            bounds[col] = (Q1 - 1.5 * IQR, Q3 + 1.5 * IQR)
+    for col in cols:
+        low, high = bounds[col]
+        masque |= (df_features[col] < low) | (df_features[col] > high)
+    return masque, bounds
+
 def preprocess_pipeline(
     file_path=r"..\data\en.openfoodfacts.org.products.csv.gz",
     sample_size=10000,
@@ -142,6 +178,9 @@ def preprocess_pipeline(
     missing_threshold=60,
     test_size=0.2,
     random_state=42,
+    remove_outliers=False,
+    outlier_cols=None,
+    outlier_exclude=None,
 ):
     """
     Enchaîne toutes les étapes dans le bon ordre et retourne un dict
@@ -150,6 +189,12 @@ def preprocess_pipeline(
     Si `chunksize` est renseigné, le CSV entier est lu morceau par morceau
     (au lieu de s'arrêter à `sample_size` lignes) : utile pour un fichier
     trop gros pour tenir en mémoire d'un coup.
+
+    Si `remove_outliers=True`, les lignes hors bornes IQR (calculées
+    UNIQUEMENT sur X_train, après imputation) sont retirées de X_train,
+    X_test et X_inconnu. `outlier_cols` permet de restreindre les colonnes
+    examinées (toutes les features par défaut) ; `outlier_exclude` permet
+    d'en exclure certaines (ex : `energy_100g`, souvent très étalée).
     """
     features = features or [
         "energy_100g", "saturated-fat_100g", "sugars_100g", "salt_100g",
@@ -193,6 +238,25 @@ def preprocess_pipeline(
     X_test = apply_imputation(X_test, valeurs_imputation)
     X_inconnu = apply_imputation(X_inconnu, valeurs_imputation)
 
+    # 6. Suppression des outliers (optionnelle), bornes apprises sur X_train
+    #    uniquement puis réappliquées telles quelles à X_test et X_inconnu
+    outlier_bounds = None
+    if remove_outliers:
+        cols = outlier_cols or list(X_train.columns)
+        if outlier_exclude:
+            cols = [c for c in cols if c not in outlier_exclude]
+
+        masque_train, outlier_bounds = remove_outliers_iqr(X_train, cols)
+        X_train = X_train[~masque_train]
+        y_train = y_train.loc[X_train.index]
+
+        masque_test, _ = remove_outliers_iqr(X_test, cols, bounds=outlier_bounds)
+        X_test = X_test[~masque_test]
+        y_test = y_test.loc[X_test.index]
+
+        masque_inconnu, _ = remove_outliers_iqr(X_inconnu, cols, bounds=outlier_bounds)
+        X_inconnu = X_inconnu[~masque_inconnu]
+
     return {
         "X_train": X_train,
         "X_test": X_test,
@@ -202,4 +266,5 @@ def preprocess_pipeline(
         "percent_missing": percent_missing,
         "columns_dropped": columns_to_drop,
         "valeurs_imputation": valeurs_imputation,
+        "outlier_bounds": outlier_bounds,
     }
