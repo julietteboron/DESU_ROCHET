@@ -34,7 +34,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 # Matrice de corrélation
 # ==========================
 
-def plot_correlation_matrix(df_restr, target_col="nutriscore_grade", method="pearson", figsize=(12, 10)):
+def plot_correlation_matrix(df_restr, target_col="nutriscore_grade",cols_categorielles=None, method="pearson", figsize=(12, 10)):
     """
     Affiche la matrice de corrélation des variables numériques (target exclue).
 
@@ -44,6 +44,8 @@ def plot_correlation_matrix(df_restr, target_col="nutriscore_grade", method="pea
         Données complètes (avec la colonne cible).
     target_col : str
         Nom de la colonne cible à exclure du calcul.
+    cols_categorielles : list, optional
+        Liste des colonnes catégorielles à exclure du calcul.
     method : str
         Méthode de corrélation ('pearson', 'spearman', 'kendall').
     figsize : tuple
@@ -54,8 +56,10 @@ def plot_correlation_matrix(df_restr, target_col="nutriscore_grade", method="pea
     corr : DataFrame
         La matrice de corrélation.
     """
-    df_num = df_restr.drop(columns=[target_col]).copy()
+    cols_categorielles = cols_categorielles or []
+    df_num = df_restr.drop(columns=[target_col] + cols_categorielles, errors="ignore").copy()
     corr = df_num.corr(method=method)
+    
 
     fig, ax = plt.subplots(figsize=figsize)
     sns.heatmap(corr, annot=True, fmt='.2f', cmap='coolwarm', center=0,
