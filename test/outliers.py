@@ -36,19 +36,31 @@ def identify_impossible(X):
     return lignes_impossibles, comptes
 
 
-# Supprimer les lignes avec des valeurs impossibles
-def apply_impossible_drop(X, y=None):
-    lignes_impossibles, _ = identify_impossible(X)
+import numpy as np
 
-    # garder seulement les lignes qui ne sont PAS impossibles
-    X_propre = X[~lignes_impossibles]
+# Remplacer les valeurs impossibles par NaN (au lieu de supprimer la ligne)
+def apply_impossible_nan(X, y=None):
+    X = X.copy()   # on travaille sur une copie pour ne pas modifier l'original
 
-    # si pas de y : on renvoie juste X nettoyé
+    # on regarde chaque colonne
+    for col in X.columns:
+        # on choisit les bonnes bornes selon la colonne
+        if col == COLONNE_ENERGIE:
+            bas, haut = BORNE_ENERGIE
+        else:
+            bas, haut = BORNE_NUTRIMENT
+
+        # les valeurs impossibles (hors bornes) deviennent NaN
+        # notna() évite de toucher aux NaN déjà présents
+        impossible = X[col].notna() & ~X[col].between(bas, haut)
+        X.loc[impossible, col] = np.nan
+
+    # si pas de y : on renvoie juste X
     if y is None:
-        return X_propre
+        return X
 
-    # sinon on garde y aligné avec X (mêmes lignes)
-    return X_propre, y.loc[X_propre.index]
+    # sinon on renvoie X et y (y n'a pas changé, aucune ligne supprimée)
+    return X, y
 
 
 # Outliers à voir et visualiser (Tukey)
