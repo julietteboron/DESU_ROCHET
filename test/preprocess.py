@@ -17,7 +17,8 @@ import csv
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from outliers import identify_impossible, apply_impossible_drop
+from outliers import identify_impossible, apply_impossible_nan
+from sklearn.preprocessing import OneHotEncoder
 
 
 SCORES_CONNUS = ["a", "b", "c", "d", "e"]
@@ -134,7 +135,58 @@ def apply_imputation(df, valeurs_imputation):
             df[col] = df[col].fillna(valeur)
     return df
 
-
+def encode_categorical_columns(X_train, X_test, X_inconnu, cat_cols=None):
+    """
+    Encode les colonnes catégorielles en One-Hot. L'encodeur est appris
+    (fit) UNIQUEMENT sur X_train (catégories apprises sur train), puis
+    appliqué tel quel à X_test et X_inconnu — même principe que pour
+    l'imputation. Les catégories jamais vues dans X_train (ex : une
+    nouvelle valeur de pnns_groups_1 dans X_inconnu) sont ignorées
+    (`handle_unknown="ignore"`), pas de crash, juste des colonnes à 0.
+ 
+    Parameters
+    ----------
+    X_train, X_test, X_inconnu : DataFrame
+        Jeux de données déjà imputés (plus de NaN attendu).
+    cat_cols : list, optional
+        Colonnes à encoder. Si None, détectées automatiquement
+        (dtypes "object"/"category" dans X_train).
+ 
+    Returns
+    -------
+    X_train, X_test, X_inconnu : DataFrame
+        Versions encodées (colonnes catégorielles remplacées par des
+        colonnes 0/1, une par catégorie).
+    encoder : OneHotEncoder ou None
+        L'encodeur ajusté (None si aucune colonne catégorielle trouvée).
+    cat_cols : list
+        Les colonnes qui ont été encodées.
+    """
+    if cat_cols is None:
+        cat_cols = list(X_train.select_dtypes(include=["object", "category"]).columns)
+ 
+    if not cat_cols:
+        return X_train, X_test, X_inconnu, None, []
+ 
+    encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    encoder.fit(X_train[cat_cols])
+    noms_colonnes = encoder.get_feature_names_out(cat_cols)
+ 
+    def _transformer(df):
+        encoded = pd.DataFrame(
+            encoder.transform(df[cat_cols]),
+            columns=noms_colonnes,
+            index=df.index,
+        )
+        return pd.concat([df.drop(columns=cat_cols), encoded], axis=1)
+ 
+    return (
+        _transformer(X_train),
+        _transformer(X_test),
+        _transformer(X_inconnu),
+        encoder,
+        cat_cols,
+    )
 
 def preprocess_pipeline(
     file_path=r"..\data\en.openfoodfacts.org.products.csv.gz",
@@ -145,6 +197,8 @@ def preprocess_pipeline(
     missing_threshold=60,
     test_size=0.2,
     random_state=42,
+    encode_categorical=True,
+    cat_cols=None,
 ):
     """
     Enchaîne toutes les étapes dans le bon ordre et retourne un dict
@@ -218,9 +272,9 @@ def preprocess_pipeline(
     nb_test_avant_impossible = len(X_test)
     nb_inconnu_avant_impossible = len(X_inconnu)
 
-    X_train, y_train = apply_impossible_drop(X_train, y_train)
-    X_test, y_test = apply_impossible_drop(X_test, y_test)
-    X_inconnu = apply_impossible_drop(X_inconnu)
+    X_train, y_train = apply_impossible_nan(X_train, y_train)
+    X_test, y_test = apply_impossible_nan(X_test, y_test)
+    X_inconnu = apply_impossible_nan(X_inconnu)
 
     lignes_impossibles_supprimees = {
         "train": nb_train_avant_impossible - len(X_train),
@@ -240,6 +294,15 @@ def preprocess_pipeline(
     X_test = apply_imputation(X_test, valeurs_imputation)
     X_inconnu = apply_imputation(X_inconnu, valeurs_imputation)
 
+    # 6. Encodage One-Hot des colonnes catégorielles (ex : pnns_groups_1),
+    #    encodeur appris sur X_train uniquement, réappliqué tel quel ailleurs
+    encoder = None
+    colonnes_encodees = []
+    if encode_categorical:
+        X_train, X_test, X_inconnu, encoder, colonnes_encodees = encode_categorical_columns(
+            X_train, X_test, X_inconnu, cat_cols=cat_cols
+        )
+
     return {
         "X_train": X_train,
         "X_test": X_test,
@@ -252,4 +315,6 @@ def preprocess_pipeline(
         "lignes_vides_supprimees": lignes_vides_supprimees,
         "valeurs_manquantes_avant_imputation": valeurs_manquantes_avant_imputation,
         "lignes_impossibles_supprimees": lignes_impossibles_supprimees,
+        "categorical_encoder": encoder,
+        "colonnes_encodees": colonnes_encodees,
     }

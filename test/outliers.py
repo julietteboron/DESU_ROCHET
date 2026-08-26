@@ -11,6 +11,12 @@ BORNE_NUTRIMENT = (0, 100)      # 100 g pour un nutriscore
 BORNE_ENERGIE = (0, 3800)       # 3800 kJ max
 COLONNE_ENERGIE = "energy_100g" # le nom de la colonne d'énergie
 
+# Bornes spécifiques pour des colonnes qui ne sont pas des g/100g
+# (ex : nova_group va de 1 à 4, additives_n est un simple compte)
+BORNES_SPECIFIQUES = {
+    "nova_group": (1, 4),
+    "additives_n": (0, 200),  # large marge de sécurité, c'est juste un compte
+}
 
 # Identifier et compter les valeurs impossibles
 def identify_impossible(X):
@@ -18,11 +24,20 @@ def identify_impossible(X):
     comptes = {}
 
     for col in X.columns:
+        # on ignore les colonnes non-numériques (ex : pnns_groups_1) :
+        # les bornes physiques ne s'appliquent qu'à des valeurs numériques
+        if not pd.api.types.is_numeric_dtype(X[col]):
+            continue
         # on choisit les bonnes bornes selon la colonne
-        if col == COLONNE_ENERGIE:
+        if col in BORNES_SPECIFIQUES:
+            bas, haut = BORNES_SPECIFIQUES[col]
+        elif col == COLONNE_ENERGIE:
             bas, haut = BORNE_ENERGIE
-        else:
+        elif col.endswith("_100g"):
             bas, haut = BORNE_NUTRIMENT
+        else:
+            # colonne numérique sans borne physique connue -> on ne filtre pas
+            continue
 
         # hors_bornes = True là où la valeur est impossible
         hors_bornes = X[col].notna() & ~X[col].between(bas, haut)
@@ -45,10 +60,18 @@ def apply_impossible_nan(X, y=None):
     # on regarde chaque colonne
     for col in X.columns:
         # on choisit les bonnes bornes selon la colonne
-        if col == COLONNE_ENERGIE:
+        if not pd.api.types.is_numeric_dtype(X[col]):
+            continue
+
+        if col in BORNES_SPECIFIQUES:
+            bas, haut = BORNES_SPECIFIQUES[col]
+        elif col == COLONNE_ENERGIE:
             bas, haut = BORNE_ENERGIE
-        else:
+        elif col.endswith("_100g"):
             bas, haut = BORNE_NUTRIMENT
+        else:
+            # colonne numérique sans borne physique connue -> on ne touche pas
+            continue
 
         # les valeurs impossibles (hors bornes) deviennent NaN
         # notna() évite de toucher aux NaN déjà présents
