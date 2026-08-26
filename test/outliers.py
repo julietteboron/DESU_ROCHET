@@ -25,7 +25,7 @@ def identify_impossible(X):
             bas, haut = BORNE_NUTRIMENT
 
         # hors_bornes = True là où la valeur est impossible
-        hors_bornes = ~X[col].between(bas, haut)
+        hors_bornes = X[col].notna() & ~X[col].between(bas, haut)
 
         # compter combien de valeurs impossibles dans cette colonne
         comptes[col] = int(hors_bornes.sum())
