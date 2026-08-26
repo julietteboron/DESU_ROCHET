@@ -17,6 +17,8 @@ import csv
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from outliers import identify_impossible, apply_impossible_drop
+
 
 SCORES_CONNUS = ["a", "b", "c", "d", "e"]
 
@@ -133,41 +135,6 @@ def apply_imputation(df, valeurs_imputation):
     return df
 
 
-def remove_outliers_iqr(df_features, cols, bounds=None):
-    """
-    Détecte les outliers via la méthode IQR (1.5 * écart interquartile) sur les
-    colonnes `cols`. Si `bounds=None`, les bornes sont calculées sur df_features
-    (à faire UNIQUEMENT sur X_train, pour ne pas apprendre sur X_test/df_inconnu).
-    Sinon, les bornes fournies (apprises sur X_train) sont réutilisées telles
-    quelles, comme pour `apply_imputation`.
- 
-    Parameters
-    ----------
-    df_features : DataFrame
-        Données sur lesquelles détecter les outliers.
-    cols : list
-        Colonnes numériques à examiner.
-    bounds : dict, optional
-        {colonne: (borne_basse, borne_haute)} déjà appris sur X_train.
- 
-    Returns
-    -------
-    masque : Series (bool)
-        True pour les lignes considérées comme outliers (à retirer).
-    bounds : dict
-        Les bornes utilisées (à réutiliser sur X_test / df_inconnu).
-    """
-    masque = pd.Series(False, index=df_features.index)
-    if bounds is None:
-        bounds = {}
-        for col in cols:
-            Q1, Q3 = df_features[col].quantile([0.25, 0.75])
-            IQR = Q3 - Q1
-            bounds[col] = (Q1 - 1.5 * IQR, Q3 + 1.5 * IQR)
-    for col in cols:
-        low, high = bounds[col]
-        masque |= (df_features[col] < low) | (df_features[col] > high)
-    return masque, bounds
 
 def preprocess_pipeline(
     file_path=r"..\data\en.openfoodfacts.org.products.csv.gz",
@@ -178,9 +145,6 @@ def preprocess_pipeline(
     missing_threshold=60,
     test_size=0.2,
     random_state=42,
-    remove_outliers=False,
-    outlier_cols=None,
-    outlier_exclude=None,
 ):
     """
     Enchaîne toutes les étapes dans le bon ordre et retourne un dict
@@ -228,34 +192,53 @@ def preprocess_pipeline(
 
     # 4. Suppression des lignes totalement vides (train et inconnu, pas test
     #    ici pour garder un test propre, mais tu peux l'ajouter si tu veux)
+    nb_train_avant_drop = len(X_train)
+    nb_test_avant_drop = len(X_test)
+    nb_inconnu_avant_drop = len(X_inconnu)
+
+    
     X_train = drop_rows_all_missing(X_train)
     y_train = y_train.loc[X_train.index]  # on garde y_train aligné avec X_train
+    X_test = drop_rows_all_missing(X_test)
+    y_test = y_test.loc[X_test.index]  # on garde y_test aligné avec X_test
     X_inconnu = drop_rows_all_missing(X_inconnu)
 
+    lignes_vides_supprimees = {
+        "train": nb_train_avant_drop - len(X_train),
+        "test": nb_test_avant_drop - len(X_test),
+        "inconnu": nb_inconnu_avant_drop - len(X_inconnu),
+    }
+
+    # 4bis. Suppression des valeurs physiquement impossibles (ex : plus de
+    #    100g d'un nutriment pour 100g de produit), AVANT l'imputation pour
+    #    que ces valeurs aberrantes ne polluent pas la moyenne/le mode appris
+    #    sur X_train. Bornes fixes (pas apprises sur les données), donc
+    #    applicables telles quelles sur train/test/inconnu sans fuite.
+    nb_train_avant_impossible = len(X_train)
+    nb_test_avant_impossible = len(X_test)
+    nb_inconnu_avant_impossible = len(X_inconnu)
+
+    X_train, y_train = apply_impossible_drop(X_train, y_train)
+    X_test, y_test = apply_impossible_drop(X_test, y_test)
+    X_inconnu = apply_impossible_drop(X_inconnu)
+
+    lignes_impossibles_supprimees = {
+        "train": nb_train_avant_impossible - len(X_train),
+        "test": nb_test_avant_impossible - len(X_test),
+        "inconnu": nb_inconnu_avant_impossible - len(X_inconnu),
+    }
+
     # 5. Imputation apprise sur X_train, appliquée partout
+    valeurs_manquantes_avant_imputation = {
+        "train": X_train.isna().sum().to_dict(),
+        "test": X_test.isna().sum().to_dict(),
+        "inconnu": X_inconnu.isna().sum().to_dict(),
+    }
+
     valeurs_imputation = fit_imputation_values(X_train)
     X_train = apply_imputation(X_train, valeurs_imputation)
     X_test = apply_imputation(X_test, valeurs_imputation)
     X_inconnu = apply_imputation(X_inconnu, valeurs_imputation)
-
-    # 6. Suppression des outliers (optionnelle), bornes apprises sur X_train
-    #    uniquement puis réappliquées telles quelles à X_test et X_inconnu
-    outlier_bounds = None
-    if remove_outliers:
-        cols = outlier_cols or list(X_train.columns)
-        if outlier_exclude:
-            cols = [c for c in cols if c not in outlier_exclude]
-
-        masque_train, outlier_bounds = remove_outliers_iqr(X_train, cols)
-        X_train = X_train[~masque_train]
-        y_train = y_train.loc[X_train.index]
-
-        masque_test, _ = remove_outliers_iqr(X_test, cols, bounds=outlier_bounds)
-        X_test = X_test[~masque_test]
-        y_test = y_test.loc[X_test.index]
-
-        masque_inconnu, _ = remove_outliers_iqr(X_inconnu, cols, bounds=outlier_bounds)
-        X_inconnu = X_inconnu[~masque_inconnu]
 
     return {
         "X_train": X_train,
@@ -266,5 +249,7 @@ def preprocess_pipeline(
         "percent_missing": percent_missing,
         "columns_dropped": columns_to_drop,
         "valeurs_imputation": valeurs_imputation,
-        "outlier_bounds": outlier_bounds,
+        "lignes_vides_supprimees": lignes_vides_supprimees,
+        "valeurs_manquantes_avant_imputation": valeurs_manquantes_avant_imputation,
+        "lignes_impossibles_supprimees": lignes_impossibles_supprimees,
     }
